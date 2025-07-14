@@ -11,7 +11,7 @@ La infraestructura despliega una arquitectura de alta disponibilidad con:
 - Servidores web con Docker
 - Almacenamiento compartido con EFS
 
-## 🏗️ Arquitectura
+## 🏗️Arquitectura
 
 ```
 Internet Gateway
