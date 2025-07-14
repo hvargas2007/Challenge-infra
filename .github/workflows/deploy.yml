@@ -7,126 +7,11 @@ on:
       - 'cf_template.yml'
       - '.github/workflows/deploy.yml'
   workflow_dispatch:
-    inputs:
-      action:
-        description: 'Action to perform'
-        required: true
-        default: 'deploy'
-        type: choice
-        options:
-          - deploy
-          - update
-          - delete
-
-env:
-  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
 
 jobs:
-  plan:
-    name: Plan Changes
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-      pull-requests: write
-    outputs:
-      has_changes: ${{ steps.changeset.outputs.has_changes }}
-      stack_exists: ${{ steps.stack-check.outputs.stack_exists }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Check if stack exists
-        id: stack-check
-        run: |
-          STACK_NAME="${{ vars.STACK_NAME }}"
-          if aws cloudformation describe-stacks --stack-name $STACK_NAME 2>/dev/null; then
-            echo "stack_exists=true" >> $GITHUB_OUTPUT
-            echo "stack_name=$STACK_NAME" >> $GITHUB_OUTPUT
-          else
-            echo "stack_exists=false" >> $GITHUB_OUTPUT
-            echo "stack_name=$STACK_NAME" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Create change set
-        id: changeset
-        if: steps.stack-check.outputs.stack_exists == 'true'
-        run: |
-          STACK_NAME="${{ steps.stack-check.outputs.stack_name }}"
-          CHANGE_SET_NAME="deploy-${{ github.sha }}"
-          
-          aws cloudformation create-change-set \
-            --stack-name $STACK_NAME \
-            --change-set-name $CHANGE_SET_NAME \
-            --template-body file://cf_template.yml \
-            --capabilities CAPABILITY_NAMED_IAM \
-            --tags Key=Environment,Value=production \
-                   Key=ManagedBy,Value=GitHubActions \
-                   Key=Repository,Value=${{ github.repository }}
-          
-          echo "Waiting for change set to be created..."
-          aws cloudformation wait change-set-create-complete \
-            --stack-name $STACK_NAME \
-            --change-set-name $CHANGE_SET_NAME || true
-          
-          STATUS=$(aws cloudformation describe-change-set \
-            --stack-name $STACK_NAME \
-            --change-set-name $CHANGE_SET_NAME \
-            --query 'Status' \
-            --output text)
-          
-          if [ "$STATUS" = "FAILED" ]; then
-            REASON=$(aws cloudformation describe-change-set \
-              --stack-name $STACK_NAME \
-              --change-set-name $CHANGE_SET_NAME \
-              --query 'StatusReason' \
-              --output text)
-            
-            if [[ "$REASON" == *"didn't contain changes"* ]]; then
-              echo "has_changes=false" >> $GITHUB_OUTPUT
-              echo "No changes detected in the stack"
-            else
-              echo "Change set creation failed: $REASON"
-              exit 1
-            fi
-          else
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-            
-            # Generate change summary
-            echo "## 📋 Change Set Summary" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            aws cloudformation describe-change-set \
-              --stack-name $STACK_NAME \
-              --change-set-name $CHANGE_SET_NAME \
-              --query 'Changes[].{Action:ResourceChange.Action,Resource:ResourceChange.LogicalResourceId,Type:ResourceChange.ResourceType}' \
-              --output table >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: New stack summary
-        if: steps.stack-check.outputs.stack_exists == 'false'
-        run: |
-          echo "## 🚀 New Stack Deployment" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "A new CloudFormation stack will be created: **${{ steps.stack-check.outputs.stack_name }}**" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Resources to be created:" >> $GITHUB_STEP_SUMMARY
-          grep -E "Type:|AWS::" cf_template.yml | grep -B1 "AWS::" | grep -v "^--$" | sed 's/Type://g' | sort | uniq >> $GITHUB_STEP_SUMMARY
-
   deploy:
     name: Deploy Stack
     runs-on: ubuntu-latest
-    needs: plan
-    if: |
-      github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
-    environment:
-      name: production
-      url: ${{ steps.outputs.outputs.load_balancer_url }}
     permissions:
       id-token: write
       contents: read
@@ -138,162 +23,25 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
       - name: Deploy stack
-        id: deploy
         run: |
           STACK_NAME="${{ vars.STACK_NAME }}"
-          ACTION="${{ github.event.inputs.action || 'deploy' }}"
           
-          if [ "$ACTION" = "delete" ]; then
-            echo "⚠️ WARNING: Deleting stack $STACK_NAME..."
-            aws cloudformation delete-stack --stack-name $STACK_NAME
-            aws cloudformation wait stack-delete-complete --stack-name $STACK_NAME
-            echo "Stack deleted successfully"
-          else
-            echo "Deploying stack $STACK_NAME..."
-            
-            if [ "${{ needs.plan.outputs.stack_exists }}" = "true" ]; then
-              # Update existing stack
-              if [ "${{ needs.plan.outputs.has_changes }}" = "true" ]; then
-                # Apply the change set created in the plan job
-                CHANGE_SET_NAME="deploy-${{ github.sha }}"
-                aws cloudformation execute-change-set \
-                  --stack-name $STACK_NAME \
-                  --change-set-name $CHANGE_SET_NAME
-                
-                aws cloudformation wait stack-update-complete --stack-name $STACK_NAME
-              else
-                echo "No changes to deploy"
-              fi
-            else
-              # Create new stack
-              aws cloudformation create-stack \
-                --stack-name $STACK_NAME \
-                --template-body file://cf_template.yml \
-                --capabilities CAPABILITY_NAMED_IAM \
-                --tags Key=Environment,Value=production \
-                       Key=ManagedBy,Value=GitHubActions \
-                       Key=Repository,Value=${{ github.repository }} \
-                       Key=LastDeployedBy,Value=${{ github.actor }} \
-                       Key=DeploymentTime,Value=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-              
-              aws cloudformation wait stack-create-complete --stack-name $STACK_NAME
-            fi
-            
-            echo "stack_name=$STACK_NAME" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Get stack outputs
-        id: outputs
-        if: github.event.inputs.action != 'delete'
-        run: |
-          STACK_NAME="${{ steps.deploy.outputs.stack_name }}"
+          echo "Deploying stack $STACK_NAME..."
           
-          # Get Nginx public IP
-          NGINX_IP=$(aws cloudformation describe-stacks \
+          aws cloudformation deploy \
             --stack-name $STACK_NAME \
-            --query 'Stacks[0].Outputs[?OutputKey==`NginxPublicIP`].OutputValue' \
-            --output text)
+            --template-file cf_template.yml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --tags Environment=production \
+                   ManagedBy=GitHubActions \
+                   Repository=${{ github.repository }}
           
-          echo "load_balancer_url=http://$NGINX_IP" >> $GITHUB_OUTPUT
-          
-          # Generate deployment summary
-          echo "## ✅ Deployment Successful" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Stack Information" >> $GITHUB_STEP_SUMMARY
-          echo "- **Stack Name:** $STACK_NAME" >> $GITHUB_STEP_SUMMARY
-          echo "- **Environment:** production" >> $GITHUB_STEP_SUMMARY
-          echo "- **Load Balancer URL:** http://$NGINX_IP" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Stack Outputs" >> $GITHUB_STEP_SUMMARY
+          # Get stack outputs
+          echo "## Stack Outputs" >> $GITHUB_STEP_SUMMARY
           aws cloudformation describe-stacks \
             --stack-name $STACK_NAME \
             --query 'Stacks[0].Outputs[].{Key:OutputKey,Value:OutputValue}' \
             --output table >> $GITHUB_STEP_SUMMARY
-
-  post-deployment-tests:
-    name: Post Deployment Tests
-    runs-on: ubuntu-latest
-    needs: deploy
-    if: |
-      needs.deploy.result == 'success' && 
-      github.event.inputs.action != 'delete'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Run health checks
-        run: |
-          STACK_NAME="${{ vars.STACK_NAME }}"
-          
-          # Get Nginx public IP
-          NGINX_IP=$(aws cloudformation describe-stacks \
-            --stack-name $STACK_NAME \
-            --query 'Stacks[0].Outputs[?OutputKey==`NginxPublicIP`].OutputValue' \
-            --output text)
-          
-          echo "## 🧪 Post Deployment Tests" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          # Test Nginx connectivity
-          echo "### Testing Load Balancer Connectivity" >> $GITHUB_STEP_SUMMARY
-          if curl -f -s -o /dev/null -w "%{http_code}" "http://$NGINX_IP" | grep -E "200|302|404"; then
-            echo "✅ Load balancer is responding" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Load balancer is not responding" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
-          
-          # Check EC2 instances health
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### EC2 Instances Status" >> $GITHUB_STEP_SUMMARY
-          
-          INSTANCE_IDS=$(aws cloudformation describe-stack-resources \
-            --stack-name $STACK_NAME \
-            --query 'StackResources[?ResourceType==`AWS::EC2::Instance`].PhysicalResourceId' \
-            --output text)
-          
-          for INSTANCE_ID in $INSTANCE_IDS; do
-            STATUS=$(aws ec2 describe-instance-status \
-              --instance-ids $INSTANCE_ID \
-              --query 'InstanceStatuses[0].InstanceStatus.Status' \
-              --output text 2>/dev/null || echo "unknown")
-            
-            if [ "$STATUS" = "ok" ]; then
-              echo "✅ Instance $INSTANCE_ID: Healthy" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "⚠️ Instance $INSTANCE_ID: Status $STATUS" >> $GITHUB_STEP_SUMMARY
-            fi
-          done
-
-  notify:
-    name: Notify Deployment Status
-    runs-on: ubuntu-latest
-    needs: [deploy, post-deployment-tests]
-    if: always()
-    steps:
-      - name: Send notification
-        run: |
-          if [ "${{ needs.deploy.result }}" = "success" ]; then
-            echo "## 🎉 Deployment Complete!" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "The CloudFormation stack has been successfully deployed." >> $GITHUB_STEP_SUMMARY
-            
-            if [ "${{ needs.post-deployment-tests.result }}" = "success" ]; then
-              echo "✅ All post-deployment tests passed" >> $GITHUB_STEP_SUMMARY
-            elif [ "${{ needs.post-deployment-tests.result }}" = "failure" ]; then
-              echo "⚠️ Some post-deployment tests failed" >> $GITHUB_STEP_SUMMARY
-            fi
-          else
-            echo "## ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Please check the logs for more information." >> $GITHUB_STEP_SUMMARY
-          fi
