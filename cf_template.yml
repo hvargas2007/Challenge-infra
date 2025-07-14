@@ -208,10 +208,10 @@ Resources:
       NatGatewayId: !Ref NATGateway
 
   # Security Groups
-  NginxSecurityGroup:
+  TraefikSecurityGroup:
       Type: "AWS::EC2::SecurityGroup"
       Properties:
-        GroupDescription: "Security group for Nginx load balancer"
+        GroupDescription: "Security group for Traefik load balancer"
         VpcId: !Ref VPC
         SecurityGroupIngress:
           - IpProtocol: tcp
@@ -222,9 +222,13 @@ Resources:
             FromPort: 443
             ToPort: 443
             CidrIp: 0.0.0.0/0
+          - IpProtocol: tcp
+            FromPort: 8080
+            ToPort: 8080
+            CidrIp: 0.0.0.0/0  # Traefik Dashboard - Consider restricting this
         Tags:
           - Key: Name
-            Value: "Nginx-SG"
+            Value: "Traefik-SG"
 
   WebServerSecurityGroup:
       Type: "AWS::EC2::SecurityGroup"
@@ -235,7 +239,7 @@ Resources:
           - IpProtocol: tcp
             FromPort: 80
             ToPort: 80
-            SourceSecurityGroupId: !Ref NginxSecurityGroup
+            SourceSecurityGroupId: !Ref TraefikSecurityGroup
         Tags:
           - Key: Name
             Value: "WebServer-SG"
@@ -255,33 +259,144 @@ Resources:
           - Key: Name
             Value: "EFS-SG"
 
-  # Nginx Load Balancer Instance
-  NginxInstance:
+  # Traefik Load Balancer Instance
+  TraefikInstance:
     Type: 'AWS::EC2::Instance'
     Properties:
       InstanceType: 't2.micro'
       ImageId: 'ami-0150ccaf51ab55a51'  # Amazon Linux 2
       SubnetId: !Ref PublicSubnetAZ1
       SecurityGroupIds:
-        - !Ref NginxSecurityGroup
+        - !Ref TraefikSecurityGroup
       IamInstanceProfile: !Ref SSMInstanceProfile
       UserData:
-        Fn::Base64: |
+        Fn::Base64: !Sub |
           #!/bin/bash
           # Update the system
           yum update -y
           
-          # Install nginx
-          amazon-linux-extras install nginx1 -y
+          # Install Docker
+          yum install -y docker git
+          service docker start
+          usermod -a -G docker ec2-user
+          systemctl enable docker
           
-          # Start and enable nginx
-          systemctl start nginx
-          systemctl enable nginx
+          # Install Docker Compose
+          curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+          ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
           
-          # Basic nginx configuration will be done manually
+          # Create Traefik directory structure
+          mkdir -p /opt/traefik/{config,certs}
+          
+          # Create Traefik configuration
+          cat > /opt/traefik/traefik.yml << 'EOF'
+          api:
+            dashboard: true
+            debug: true
+          
+          entryPoints:
+            web:
+              address: ":80"
+              http:
+                redirections:
+                  entryPoint:
+                    to: websecure
+                    scheme: https
+            websecure:
+              address: ":443"
+          
+          providers:
+            docker:
+              endpoint: "unix:///var/run/docker.sock"
+              exposedByDefault: false
+              network: web
+            file:
+              directory: /config
+              watch: true
+          
+          certificatesResolvers:
+            letsencrypt:
+              acme:
+                email: admin@example.com  # Change this
+                storage: /certs/acme.json
+                httpChallenge:
+                  entryPoint: web
+          
+          log:
+            level: INFO
+          
+          accessLog: {}
+          EOF
+          
+          # Create docker-compose.yml for Traefik
+          cat > /opt/traefik/docker-compose.yml << 'EOF'
+          version: '3.8'
+          
+          services:
+            traefik:
+              image: traefik:v3.0
+              container_name: traefik
+              restart: unless-stopped
+              security_opt:
+                - no-new-privileges:true
+              ports:
+                - "80:80"
+                - "443:443"
+                - "8080:8080"
+              volumes:
+                - /etc/localtime:/etc/localtime:ro
+                - /var/run/docker.sock:/var/run/docker.sock:ro
+                - ./traefik.yml:/traefik.yml:ro
+                - ./config:/config:ro
+                - ./certs:/certs
+              networks:
+                - web
+              labels:
+                - "traefik.enable=true"
+                - "traefik.http.routers.dashboard.rule=Host(\`traefik.${PublicIp}.nip.io\`)"
+                - "traefik.http.routers.dashboard.service=api@internal"
+                - "traefik.http.routers.dashboard.middlewares=auth"
+                - "traefik.http.middlewares.auth.basicauth.users=admin:$$2y$$10$$YKaGx.JryJ5tKDQJFrLO8uNOgMH5bCGmM9j8H/12MYCQgQr71gO3C"  # admin:admin - CHANGE THIS!
+          
+          networks:
+            web:
+              external: true
+          EOF
+          
+          # Create Docker network
+          docker network create web
+          
+          # Set permissions
+          chmod 600 /opt/traefik/certs/acme.json 2>/dev/null || touch /opt/traefik/certs/acme.json && chmod 600 /opt/traefik/certs/acme.json
+          
+          # Start Traefik
+          cd /opt/traefik
+          docker-compose up -d
+          
+          # Create systemd service
+          cat > /etc/systemd/system/traefik.service << 'EOF'
+          [Unit]
+          Description=Traefik
+          After=docker.service
+          Requires=docker.service
+          
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          WorkingDirectory=/opt/traefik
+          ExecStart=/usr/local/bin/docker-compose up -d
+          ExecStop=/usr/local/bin/docker-compose down
+          TimeoutStartSec=0
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          systemctl enable traefik
       Tags:
         - Key: Name
-          Value: "Nginx-LoadBalancer"
+          Value: "Traefik-LoadBalancer"
 
   # Web Server Instances
   WebServerAZ1:
@@ -330,6 +445,48 @@ Resources:
           # Verify installations
           docker --version
           docker-compose --version
+          
+          # Join Docker network (same as Traefik)
+          docker network create web 2>/dev/null || true
+          
+          # Clone application repository
+          cd /home/ec2-user
+          git clone https://github.com/YOUR_REPO/YOUR_APP.git app || echo "Update with your repo URL"
+          cd app/docker
+          
+          # Copy Traefik-enabled compose file if exists
+          if [ -f docker-compose.traefik.yml ]; then
+            cp docker-compose.traefik.yml docker-compose.yml
+          fi
+          
+          # Set environment variables
+          export DOMAIN=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4).nip.io
+          echo "DOMAIN=$DOMAIN" >> /etc/environment
+          
+          # Build and start the application
+          docker-compose build
+          docker-compose up -d
+          
+          # Create systemd service for the app
+          cat > /etc/systemd/system/api-app.service << 'EOF'
+          [Unit]
+          Description=API Application
+          After=docker.service
+          Requires=docker.service
+          
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          WorkingDirectory=/home/ec2-user/app/docker
+          ExecStart=/usr/local/bin/docker-compose up -d
+          ExecStop=/usr/local/bin/docker-compose down
+          TimeoutStartSec=0
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          systemctl enable api-app
       Tags:
         - Key: Name
           Value: "WebServer-AZ1"
@@ -380,6 +537,48 @@ Resources:
           # Verify installations
           docker --version
           docker-compose --version
+          
+          # Join Docker network (same as Traefik)
+          docker network create web 2>/dev/null || true
+          
+          # Clone application repository
+          cd /home/ec2-user
+          git clone https://github.com/YOUR_REPO/YOUR_APP.git app || echo "Update with your repo URL"
+          cd app/docker
+          
+          # Copy Traefik-enabled compose file if exists
+          if [ -f docker-compose.traefik.yml ]; then
+            cp docker-compose.traefik.yml docker-compose.yml
+          fi
+          
+          # Set environment variables
+          export DOMAIN=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4).nip.io
+          echo "DOMAIN=$DOMAIN" >> /etc/environment
+          
+          # Build and start the application
+          docker-compose build
+          docker-compose up -d
+          
+          # Create systemd service for the app
+          cat > /etc/systemd/system/api-app.service << 'EOF'
+          [Unit]
+          Description=API Application
+          After=docker.service
+          Requires=docker.service
+          
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          WorkingDirectory=/home/ec2-user/app/docker
+          ExecStart=/usr/local/bin/docker-compose up -d
+          ExecStop=/usr/local/bin/docker-compose down
+          TimeoutStartSec=0
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          systemctl enable api-app
       Tags:
         - Key: Name
           Value: "WebServer-AZ2"
@@ -446,9 +645,13 @@ Resources:
         - !Ref EFSSecurityGroup
 
 Outputs:
-  NginxPublicIP:
-    Description: "Public IP of Nginx Load Balancer"
-    Value: !GetAtt NginxInstance.PublicIp
+  TraefikPublicIP:
+    Description: "Public IP of Traefik Load Balancer"
+    Value: !GetAtt TraefikInstance.PublicIp
+  
+  TraefikDashboard:
+    Description: "URL for Traefik Dashboard"
+    Value: !Sub "http://${TraefikInstance.PublicIp}:8080"
 
   EFSFileSystemId:
     Description: "EFS File System ID"
