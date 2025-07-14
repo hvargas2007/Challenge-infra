@@ -260,7 +260,7 @@ Resources:
     Type: 'AWS::EC2::Instance'
     Properties:
       InstanceType: 't2.micro'
-      ImageId: 'ami-020cba7c55df1f615'
+      ImageId: 'ami-0150ccaf51ab55a51'  # Amazon Linux 2
       SubnetId: !Ref PublicSubnetAZ1
       SecurityGroupIds:
         - !Ref NginxSecurityGroup
@@ -268,9 +268,17 @@ Resources:
       UserData:
         Fn::Base64: |
           #!/bin/bash
-          apt-get update
-          apt-get install -y nginx
-          # Configuración básica de Nginx se hará manualmente
+          # Update the system
+          yum update -y
+          
+          # Install nginx
+          amazon-linux-extras install nginx1 -y
+          
+          # Start and enable nginx
+          systemctl start nginx
+          systemctl enable nginx
+          
+          # Basic nginx configuration will be done manually
       Tags:
         - Key: Name
           Value: "Nginx-LoadBalancer"
@@ -280,7 +288,7 @@ Resources:
     Type: 'AWS::EC2::Instance'
     Properties:
       InstanceType: 't2.micro'
-      ImageId: 'ami-020cba7c55df1f615'
+      ImageId: 'ami-0150ccaf51ab55a51'  # Amazon Linux 2
       SubnetId: !Ref PrivateSubnetAZ1
       SecurityGroupIds:
         - !Ref WebServerSecurityGroup
@@ -288,27 +296,40 @@ Resources:
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
-          # Actualizar sistema
-          apt-get update
-          apt-get install -y nfs-common
+          # Update the system
+          yum update -y
           
-          # Montar EFS
+          # Install required tools
+          yum install -y telnet jq tree nfs-utils git htop yum-utils
+          yum install -y amazon-cloudwatch-agent amazon-efs-utils
+          
+          # Install Docker
+          yum install -y docker
+          service docker start
+          usermod -a -G docker ec2-user
+          
+          # Enable Docker to start on boot
+          systemctl enable docker
+          
+          # Install Docker Compose
+          curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+          
+          # Create symlink for docker-compose
+          ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
+          
+          # Mount EFS
           mkdir -p /mnt/efs
-          echo "${EFSFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /mnt/efs nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,_netdev 0 0" >> /etc/fstab
-          mount -a
+          mount -t efs -o tls ${EFSFileSystem}:/ /mnt/efs
+          echo "${EFSFileSystem}:/ /mnt/efs efs defaults,_netdev,tls 0 0" >> /etc/fstab
+          
+          # Create json-storage directory
           mkdir -p /mnt/efs/json-storage
           chmod 755 /mnt/efs/json-storage
           
-          # Instalar Docker
-          apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-          apt-get update
-          apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-          
-          # Habilitar Docker
-          systemctl enable docker
-          systemctl start docker
+          # Verify installations
+          docker --version
+          docker-compose --version
       Tags:
         - Key: Name
           Value: "WebServer-AZ1"
@@ -317,7 +338,7 @@ Resources:
     Type: 'AWS::EC2::Instance'
     Properties:
       InstanceType: 't2.micro'
-      ImageId: 'ami-020cba7c55df1f615'
+      ImageId: 'ami-0150ccaf51ab55a51'  # Amazon Linux 2
       SubnetId: !Ref PrivateSubnetAZ2
       SecurityGroupIds:
         - !Ref WebServerSecurityGroup
@@ -325,27 +346,40 @@ Resources:
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
-          # Actualizar sistema
-          apt-get update
-          apt-get install -y nfs-common
+          # Update the system
+          yum update -y
           
-          # Montar EFS
+          # Install required tools
+          yum install -y telnet jq tree nfs-utils git htop yum-utils
+          yum install -y amazon-cloudwatch-agent amazon-efs-utils
+          
+          # Install Docker
+          yum install -y docker
+          service docker start
+          usermod -a -G docker ec2-user
+          
+          # Enable Docker to start on boot
+          systemctl enable docker
+          
+          # Install Docker Compose
+          curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+          
+          # Create symlink for docker-compose
+          ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
+          
+          # Mount EFS
           mkdir -p /mnt/efs
-          echo "${EFSFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /mnt/efs nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,_netdev 0 0" >> /etc/fstab
-          mount -a
+          mount -t efs -o tls ${EFSFileSystem}:/ /mnt/efs
+          echo "${EFSFileSystem}:/ /mnt/efs efs defaults,_netdev,tls 0 0" >> /etc/fstab
+          
+          # Create json-storage directory
           mkdir -p /mnt/efs/json-storage
           chmod 755 /mnt/efs/json-storage
           
-          # Instalar Docker
-          apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-          apt-get update
-          apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-          
-          # Habilitar Docker
-          systemctl enable docker
-          systemctl start docker
+          # Verify installations
+          docker --version
+          docker-compose --version
       Tags:
         - Key: Name
           Value: "WebServer-AZ2"
