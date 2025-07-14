@@ -3,9 +3,6 @@ name: Validate CloudFormation
 on:
   pull_request:
     branches: [ main ]
-    paths:
-      - 'cf_template.yml'
-      - '.github/workflows/validate.yml'
 
 jobs:
   cfn-lint:

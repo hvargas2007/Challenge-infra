@@ -3,9 +3,7 @@ name: Deploy CloudFormation
 on:
   push:
     branches: [ main ]
-    paths:
-      - 'cf_template.yml'
-      - '.github/workflows/deploy.yml'
+
   workflow_dispatch:
 
 jobs:
