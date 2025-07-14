@@ -1,0 +1,148 @@
+name: Validate CloudFormation
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'cf_template.yml'
+      - '.github/workflows/validate.yml'
+
+jobs:
+  cfn-lint:
+    name: CloudFormation Linting
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install cfn-lint
+        run: |
+          pip install cfn-lint
+
+      - name: Run cfn-lint
+        run: |
+          cfn-lint cf_template.yml
+
+  cfn-nag:
+    name: CloudFormation Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.0'
+
+      - name: Install cfn-nag
+        run: |
+          gem install cfn-nag
+
+      - name: Run cfn-nag
+        run: |
+          cfn_nag_scan --input-path cf_template.yml
+
+  validate-template:
+    name: Validate Template Syntax
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Validate CloudFormation template
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://cf_template.yml \
+            --region ${{ vars.AWS_REGION || 'us-east-1' }}
+
+  drift-detection:
+    name: Check for Stack Drift
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Check if stack exists
+        id: stack-check
+        run: |
+          if aws cloudformation describe-stacks --stack-name ${{ vars.STACK_NAME }} 2>/dev/null; then
+            echo "stack_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "stack_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Detect drift
+        if: steps.stack-check.outputs.stack_exists == 'true'
+        run: |
+          echo "Initiating drift detection..."
+          DRIFT_ID=$(aws cloudformation detect-stack-drift \
+            --stack-name ${{ vars.STACK_NAME }} \
+            --query 'StackDriftDetectionId' \
+            --output text)
+          
+          echo "Waiting for drift detection to complete..."
+          aws cloudformation wait stack-drift-detection-complete \
+            --stack-drift-detection-id $DRIFT_ID
+          
+          echo "Getting drift status..."
+          DRIFT_STATUS=$(aws cloudformation describe-stack-drift-detection-status \
+            --stack-drift-detection-id $DRIFT_ID \
+            --query 'StackDriftStatus' \
+            --output text)
+          
+          if [ "$DRIFT_STATUS" = "DRIFTED" ]; then
+            echo "⚠️ Stack has drifted! Review the changes before proceeding."
+            aws cloudformation describe-stack-resource-drifts \
+              --stack-name ${{ vars.STACK_NAME }} \
+              --stack-resource-drift-status-filters MODIFIED DELETED
+            exit 1
+          else
+            echo "✅ Stack is in sync"
+          fi
+
+  cost-estimation:
+    name: Estimate Costs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Generate cost report
+        run: |
+          echo "## 💰 Cost Estimation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Resources in Template:" >> $GITHUB_STEP_SUMMARY
+          echo "- 1x VPC (Free)" >> $GITHUB_STEP_SUMMARY
+          echo "- 1x Internet Gateway (Free)" >> $GITHUB_STEP_SUMMARY
+          echo "- 1x NAT Gateway (~\$45/month)" >> $GITHUB_STEP_SUMMARY
+          echo "- 1x Elastic IP (~\$3.60/month)" >> $GITHUB_STEP_SUMMARY
+          echo "- 3x EC2 t2.micro instances (~\$25.20/month)" >> $GITHUB_STEP_SUMMARY
+          echo "- 2x EBS Volumes 50GB (~\$10/month)" >> $GITHUB_STEP_SUMMARY
+          echo "- 1x EFS File System (~\$0.30/GB/month)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Estimated Total: ~\$84.10/month** (without data transfer costs)" >> $GITHUB_STEP_SUMMARY

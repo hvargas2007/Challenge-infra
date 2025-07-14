@@ -1,0 +1,429 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: "High Availability API infrastructure with 2 AZs, public/private subnets, and Nginx load balancer"
+
+Mappings:
+    SubnetConfig:
+      VPC:
+        CIDR: "10.0.0.0/16"
+      PublicSubnetAZ1:
+        CIDR: "10.0.1.0/24"
+      PublicSubnetAZ2:
+        CIDR: "10.0.2.0/24"
+      PrivateSubnetAZ1:
+        CIDR: "10.0.11.0/24"
+      PrivateSubnetAZ2:
+        CIDR: "10.0.12.0/24"
+
+Resources:
+  # IAM Role for SSM
+  SSMRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "EC2-SSM-Role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Tags:
+        - Key: Name
+          Value: "SSM-Role"
+
+  SSMInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      InstanceProfileName: "EC2-SSM-Profile"
+      Roles:
+        - !Ref SSMRole
+
+  # VPC Configuration
+  VPC:
+      Type: "AWS::EC2::VPC"
+      Properties:
+        EnableDnsSupport: "true"
+        EnableDnsHostnames: "true"
+        CidrBlock:
+          Fn::FindInMap:
+            - "SubnetConfig"
+            - "VPC"
+            - "CIDR"
+        Tags:
+          - Key: Name
+            Value: "API-VPC"
+
+  # Internet Gateway
+  InternetGateway:
+      Type: "AWS::EC2::InternetGateway"
+      Properties:
+        Tags:
+          - Key: Name
+            Value: "API-IGW"
+
+  AttachGateway:
+      Type: "AWS::EC2::VPCGatewayAttachment"
+      Properties:
+        VpcId: !Ref VPC
+        InternetGatewayId: !Ref InternetGateway
+
+  # Public Subnets
+  PublicSubnetAZ1:
+      Type: "AWS::EC2::Subnet"
+      Properties:
+        VpcId: !Ref VPC
+        CidrBlock:
+          Fn::FindInMap:
+            - "SubnetConfig"
+            - "PublicSubnetAZ1"
+            - "CIDR"
+        AvailabilityZone: !Select [0, !GetAZs ""]
+        MapPublicIpOnLaunch: true
+        Tags:
+          - Key: Name
+            Value: "Public-Subnet-AZ1"
+
+  PublicSubnetAZ2:
+      Type: "AWS::EC2::Subnet"
+      Properties:
+        VpcId: !Ref VPC
+        CidrBlock:
+          Fn::FindInMap:
+            - "SubnetConfig"
+            - "PublicSubnetAZ2"
+            - "CIDR"
+        AvailabilityZone: !Select [1, !GetAZs ""]
+        MapPublicIpOnLaunch: true
+        Tags:
+          - Key: Name
+            Value: "Public-Subnet-AZ2"
+
+  # Private Subnets
+  PrivateSubnetAZ1:
+      Type: "AWS::EC2::Subnet"
+      Properties:
+        VpcId: !Ref VPC
+        CidrBlock:
+          Fn::FindInMap:
+            - "SubnetConfig"
+            - "PrivateSubnetAZ1"
+            - "CIDR"
+        AvailabilityZone: !Select [0, !GetAZs ""]
+        Tags:
+          - Key: Name
+            Value: "Private-Subnet-AZ1"
+
+  PrivateSubnetAZ2:
+      Type: "AWS::EC2::Subnet"
+      Properties:
+        VpcId: !Ref VPC
+        CidrBlock:
+          Fn::FindInMap:
+            - "SubnetConfig"
+            - "PrivateSubnetAZ2"
+            - "CIDR"
+        AvailabilityZone: !Select [1, !GetAZs ""]
+        Tags:
+          - Key: Name
+            Value: "Private-Subnet-AZ2"
+
+  # Route Tables
+  PublicRouteTable:
+      Type: "AWS::EC2::RouteTable"
+      Properties:
+        VpcId: !Ref VPC
+        Tags:
+          - Key: Name
+            Value: "Public-Route-Table"
+
+  PublicRoute:
+      Type: "AWS::EC2::Route"
+      DependsOn: AttachGateway
+      Properties:
+        RouteTableId: !Ref PublicRouteTable
+        DestinationCidrBlock: "0.0.0.0/0"
+        GatewayId: !Ref InternetGateway
+
+  PublicSubnetAZ1RouteTableAssociation:
+      Type: "AWS::EC2::SubnetRouteTableAssociation"
+      Properties:
+        SubnetId: !Ref PublicSubnetAZ1
+        RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetAZ2RouteTableAssociation:
+      Type: "AWS::EC2::SubnetRouteTableAssociation"
+      Properties:
+        SubnetId: !Ref PublicSubnetAZ2
+        RouteTableId: !Ref PublicRouteTable
+
+  # NAT Gateway
+  NATGatewayEIP:
+    Type: "AWS::EC2::EIP"
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: "NAT-Gateway-EIP"
+
+  NATGateway:
+    Type: "AWS::EC2::NatGateway"
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnetAZ1
+      Tags:
+        - Key: Name
+          Value: "NAT-Gateway"
+
+  PrivateRouteTable:
+      Type: "AWS::EC2::RouteTable"
+      Properties:
+        VpcId: !Ref VPC
+        Tags:
+          - Key: Name
+            Value: "Private-Route-Table"
+
+  PrivateSubnetAZ1RouteTableAssociation:
+      Type: "AWS::EC2::SubnetRouteTableAssociation"
+      Properties:
+        SubnetId: !Ref PrivateSubnetAZ1
+        RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetAZ2RouteTableAssociation:
+      Type: "AWS::EC2::SubnetRouteTableAssociation"
+      Properties:
+        SubnetId: !Ref PrivateSubnetAZ2
+        RouteTableId: !Ref PrivateRouteTable
+
+  # Route for Private Subnets to NAT Gateway
+  PrivateRoute:
+    Type: "AWS::EC2::Route"
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NATGateway
+
+  # Security Groups
+  NginxSecurityGroup:
+      Type: "AWS::EC2::SecurityGroup"
+      Properties:
+        GroupDescription: "Security group for Nginx load balancer"
+        VpcId: !Ref VPC
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: 0.0.0.0/0
+          - IpProtocol: tcp
+            FromPort: 443
+            ToPort: 443
+            CidrIp: 0.0.0.0/0
+        Tags:
+          - Key: Name
+            Value: "Nginx-SG"
+
+  WebServerSecurityGroup:
+      Type: "AWS::EC2::SecurityGroup"
+      Properties:
+        GroupDescription: "Security group for web servers"
+        VpcId: !Ref VPC
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            SourceSecurityGroupId: !Ref NginxSecurityGroup
+        Tags:
+          - Key: Name
+            Value: "WebServer-SG"
+
+  # EFS Security Group
+  EFSSecurityGroup:
+      Type: "AWS::EC2::SecurityGroup"
+      Properties:
+        GroupDescription: "Security group for EFS mount targets"
+        VpcId: !Ref VPC
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 2049
+            ToPort: 2049
+            SourceSecurityGroupId: !Ref WebServerSecurityGroup
+        Tags:
+          - Key: Name
+            Value: "EFS-SG"
+
+  # Nginx Load Balancer Instance
+  NginxInstance:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      InstanceType: 't2.micro'
+      ImageId: 'ami-020cba7c55df1f615'
+      SubnetId: !Ref PublicSubnetAZ1
+      SecurityGroupIds:
+        - !Ref NginxSecurityGroup
+      IamInstanceProfile: !Ref SSMInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt-get update
+          apt-get install -y nginx
+          # Configuración básica de Nginx se hará manualmente
+      Tags:
+        - Key: Name
+          Value: "Nginx-LoadBalancer"
+
+  # Web Server Instances
+  WebServerAZ1:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      InstanceType: 't2.micro'
+      ImageId: 'ami-020cba7c55df1f615'
+      SubnetId: !Ref PrivateSubnetAZ1
+      SecurityGroupIds:
+        - !Ref WebServerSecurityGroup
+      IamInstanceProfile: !Ref SSMInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Actualizar sistema
+          apt-get update
+          apt-get install -y nfs-common
+          
+          # Montar EFS
+          mkdir -p /mnt/efs
+          echo "${EFSFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /mnt/efs nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,_netdev 0 0" >> /etc/fstab
+          mount -a
+          mkdir -p /mnt/efs/json-storage
+          chmod 755 /mnt/efs/json-storage
+          
+          # Instalar Docker
+          apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+          apt-get update
+          apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+          
+          # Habilitar Docker
+          systemctl enable docker
+          systemctl start docker
+      Tags:
+        - Key: Name
+          Value: "WebServer-AZ1"
+
+  WebServerAZ2:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      InstanceType: 't2.micro'
+      ImageId: 'ami-020cba7c55df1f615'
+      SubnetId: !Ref PrivateSubnetAZ2
+      SecurityGroupIds:
+        - !Ref WebServerSecurityGroup
+      IamInstanceProfile: !Ref SSMInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Actualizar sistema
+          apt-get update
+          apt-get install -y nfs-common
+          
+          # Montar EFS
+          mkdir -p /mnt/efs
+          echo "${EFSFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /mnt/efs nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,_netdev 0 0" >> /etc/fstab
+          mount -a
+          mkdir -p /mnt/efs/json-storage
+          chmod 755 /mnt/efs/json-storage
+          
+          # Instalar Docker
+          apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+          apt-get update
+          apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+          
+          # Habilitar Docker
+          systemctl enable docker
+          systemctl start docker
+      Tags:
+        - Key: Name
+          Value: "WebServer-AZ2"
+
+  # EBS Volumes for Web Servers
+  WebServerAZ1Volume:
+    Type: 'AWS::EC2::Volume'
+    Properties:
+      Size: 50
+      AvailabilityZone: !GetAtt WebServerAZ1.AvailabilityZone
+      Tags:
+        - Key: Name
+          Value: "WebServer-AZ1-Volume"
+
+  WebServerAZ2Volume:
+    Type: 'AWS::EC2::Volume'
+    Properties:
+      Size: 50
+      AvailabilityZone: !GetAtt WebServerAZ2.AvailabilityZone
+      Tags:
+        - Key: Name
+          Value: "WebServer-AZ2-Volume"
+
+  WebServerAZ1VolumeAttachment:
+    Type: 'AWS::EC2::VolumeAttachment'
+    Properties:
+      Device: '/dev/sdh'
+      VolumeId: !Ref WebServerAZ1Volume
+      InstanceId: !Ref WebServerAZ1
+
+  WebServerAZ2VolumeAttachment:
+    Type: 'AWS::EC2::VolumeAttachment'
+    Properties:
+      Device: '/dev/sdh'
+      VolumeId: !Ref WebServerAZ2Volume
+      InstanceId: !Ref WebServerAZ2
+
+  # EFS File System
+  EFSFileSystem:
+    Type: 'AWS::EFS::FileSystem'
+    Properties:
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      Encrypted: true
+      FileSystemTags:
+        - Key: Name
+          Value: "API-SharedStorage"
+
+  # EFS Mount Targets
+  EFSMountTargetAZ1:
+    Type: 'AWS::EFS::MountTarget'
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PrivateSubnetAZ1
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  EFSMountTargetAZ2:
+    Type: 'AWS::EFS::MountTarget'
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PrivateSubnetAZ2
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+Outputs:
+  NginxPublicIP:
+    Description: "Public IP of Nginx Load Balancer"
+    Value: !GetAtt NginxInstance.PublicIp
+
+  EFSFileSystemId:
+    Description: "EFS File System ID"
+    Value: !Ref EFSFileSystem
+
+  WebServerAZ1PrivateIP:
+    Description: "Private IP of Web Server in AZ1"
+    Value: !GetAtt WebServerAZ1.PrivateIp
+
+  WebServerAZ2PrivateIP:
+    Description: "Private IP of Web Server in AZ2"
+    Value: !GetAtt WebServerAZ2.PrivateIp
