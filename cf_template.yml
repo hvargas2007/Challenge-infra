@@ -270,7 +270,7 @@ Resources:
         - !Ref TraefikSecurityGroup
       IamInstanceProfile: !Ref SSMInstanceProfile
       UserData:
-        Fn::Base64: !Sub |
+        Fn::Base64: |
           #!/bin/bash
           # Update the system
           yum update -y
