@@ -455,6 +455,38 @@ Resources:
       SecurityGroups:
         - !Ref EFSSecurityGroup
 
+  # ECR Repository for Docker images
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${AWS::StackName}-api-repository"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-ecr-repository"
+
 Outputs:
   TraefikPublicIP:
     Description: "Public IP of Traefik Load Balancer"
@@ -475,3 +507,15 @@ Outputs:
   WebServerAZ2PrivateIP:
     Description: "Private IP of Web Server in AZ2"
     Value: !GetAtt WebServerAZ2.PrivateIp
+
+  ECRRepositoryURI:
+    Description: "URI of the ECR Repository"
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepository}"
+    Export:
+      Name: !Sub "${AWS::StackName}-ECRRepositoryURI"
+
+  ECRRepositoryName:
+    Description: "Name of the ECR Repository"
+    Value: !Ref ECRRepository
+    Export:
+      Name: !Sub "${AWS::StackName}-ECRRepositoryName"
