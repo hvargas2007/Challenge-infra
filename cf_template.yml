@@ -1,25 +1,90 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: "High Availability API infrastructure with 2 AZs, public/private subnets, and Nginx load balancer"
+Description: "High Availability API infrastructure with 2 AZs, public/private subnets, and traefix load balancer"
 
-Mappings:
-    SubnetConfig:
-      VPC:
-        CIDR: "10.0.0.0/16"
-      PublicSubnetAZ1:
-        CIDR: "10.0.1.0/24"
-      PublicSubnetAZ2:
-        CIDR: "10.0.2.0/24"
-      PrivateSubnetAZ1:
-        CIDR: "10.0.11.0/24"
-      PrivateSubnetAZ2:
-        CIDR: "10.0.12.0/24"
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: "API"
+    Description: "Environment name prefix for resources"
+  
+  VpcCIDR:
+    Type: String
+    Default: "10.0.0.0/16"
+    Description: "CIDR block for VPC"
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: "must be a valid IP CIDR range of the form x.x.x.x/x"
+  
+  PublicSubnetAZ1CIDR:
+    Type: String
+    Default: "10.0.1.0/24"
+    Description: "CIDR block for public subnet in AZ1"
+  
+  PublicSubnetAZ2CIDR:
+    Type: String
+    Default: "10.0.2.0/24"
+    Description: "CIDR block for public subnet in AZ2"
+  
+  PrivateSubnetAZ1CIDR:
+    Type: String
+    Default: "10.0.11.0/24"
+    Description: "CIDR block for private subnet in AZ1"
+  
+  PrivateSubnetAZ2CIDR:
+    Type: String
+    Default: "10.0.12.0/24"
+    Description: "CIDR block for private subnet in AZ2"
+  
+  InstanceType:
+    Type: String
+    Default: "t2.micro"
+    Description: "EC2 instance type"
+    AllowedValues:
+      - t2.micro
+      - t2.small
+      - t2.medium
+      - t3.micro
+      - t3.small
+      - t3.medium
+  
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+    Description: "AMI ID for EC2 instances"
+  
+  EBSVolumeSize:
+    Type: Number
+    Default: 50
+    Description: "Size of EBS volumes in GB"
+    MinValue: 8
+    MaxValue: 1000
+  
+  TraefikDashboardAccess:
+    Type: String
+    Default: "0.0.0.0/0"
+    Description: "CIDR block for Traefik dashboard access (restrict in production)"
+  
+  EnableEFSEncryption:
+    Type: String
+    Default: "true"
+    Description: "Enable encryption for EFS"
+    AllowedValues:
+      - "true"
+      - "false"
+  
+  ECRImageRetentionCount:
+    Type: Number
+    Default: 10
+    Description: "Number of ECR images to retain"
+    MinValue: 1
+    MaxValue: 100
+
 
 Resources:
   # IAM Role for SSM
   SSMRole:
     Type: "AWS::IAM::Role"
     Properties:
-      RoleName: "EC2-SSM-Role"
+      RoleName: !Sub "${EnvironmentName}-EC2-SSM-Role"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -31,14 +96,15 @@ Resources:
               - "sts:AssumeRole"
       ManagedPolicyArns:
         - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        - "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess"
       Tags:
         - Key: Name
-          Value: "SSM-Role"
+          Value: !Sub "${EnvironmentName}-SSM-Role"
 
   SSMInstanceProfile:
     Type: "AWS::IAM::InstanceProfile"
     Properties:
-      InstanceProfileName: "EC2-SSM-Profile"
+      InstanceProfileName: !Sub "${EnvironmentName}-EC2-SSM-Profile"
       Roles:
         - !Ref SSMRole
 
@@ -48,14 +114,10 @@ Resources:
       Properties:
         EnableDnsSupport: "true"
         EnableDnsHostnames: "true"
-        CidrBlock:
-          Fn::FindInMap:
-            - "SubnetConfig"
-            - "VPC"
-            - "CIDR"
+        CidrBlock: !Ref VpcCIDR
         Tags:
           - Key: Name
-            Value: "API-VPC"
+            Value: !Sub "${EnvironmentName}-VPC"
 
   # Internet Gateway
   InternetGateway:
@@ -63,7 +125,7 @@ Resources:
       Properties:
         Tags:
           - Key: Name
-            Value: "API-IGW"
+            Value: !Sub "${EnvironmentName}-IGW"
 
   AttachGateway:
       Type: "AWS::EC2::VPCGatewayAttachment"
@@ -76,60 +138,44 @@ Resources:
       Type: "AWS::EC2::Subnet"
       Properties:
         VpcId: !Ref VPC
-        CidrBlock:
-          Fn::FindInMap:
-            - "SubnetConfig"
-            - "PublicSubnetAZ1"
-            - "CIDR"
+        CidrBlock: !Ref PublicSubnetAZ1CIDR
         AvailabilityZone: !Select [0, !GetAZs ""]
         MapPublicIpOnLaunch: true
         Tags:
           - Key: Name
-            Value: "Public-Subnet-AZ1"
+            Value: !Sub "${EnvironmentName}-Public-Subnet-AZ1"
 
   PublicSubnetAZ2:
       Type: "AWS::EC2::Subnet"
       Properties:
         VpcId: !Ref VPC
-        CidrBlock:
-          Fn::FindInMap:
-            - "SubnetConfig"
-            - "PublicSubnetAZ2"
-            - "CIDR"
+        CidrBlock: !Ref PublicSubnetAZ2CIDR
         AvailabilityZone: !Select [1, !GetAZs ""]
         MapPublicIpOnLaunch: true
         Tags:
           - Key: Name
-            Value: "Public-Subnet-AZ2"
+            Value: !Sub "${EnvironmentName}-Public-Subnet-AZ2"
 
   # Private Subnets
   PrivateSubnetAZ1:
       Type: "AWS::EC2::Subnet"
       Properties:
         VpcId: !Ref VPC
-        CidrBlock:
-          Fn::FindInMap:
-            - "SubnetConfig"
-            - "PrivateSubnetAZ1"
-            - "CIDR"
+        CidrBlock: !Ref PrivateSubnetAZ1CIDR
         AvailabilityZone: !Select [0, !GetAZs ""]
         Tags:
           - Key: Name
-            Value: "Private-Subnet-AZ1"
+            Value: !Sub "${EnvironmentName}-Private-Subnet-AZ1"
 
   PrivateSubnetAZ2:
       Type: "AWS::EC2::Subnet"
       Properties:
         VpcId: !Ref VPC
-        CidrBlock:
-          Fn::FindInMap:
-            - "SubnetConfig"
-            - "PrivateSubnetAZ2"
-            - "CIDR"
+        CidrBlock: !Ref PrivateSubnetAZ2CIDR
         AvailabilityZone: !Select [1, !GetAZs ""]
         Tags:
           - Key: Name
-            Value: "Private-Subnet-AZ2"
+            Value: !Sub "${EnvironmentName}-Private-Subnet-AZ2"
 
   # Route Tables
   PublicRouteTable:
@@ -138,7 +184,7 @@ Resources:
         VpcId: !Ref VPC
         Tags:
           - Key: Name
-            Value: "Public-Route-Table"
+            Value: !Sub "${EnvironmentName}-Public-Route-Table"
 
   PublicRoute:
       Type: "AWS::EC2::Route"
@@ -168,7 +214,7 @@ Resources:
       Domain: vpc
       Tags:
         - Key: Name
-          Value: "NAT-Gateway-EIP"
+          Value: !Sub "${EnvironmentName}-NAT-Gateway-EIP"
 
   NATGateway:
     Type: "AWS::EC2::NatGateway"
@@ -177,7 +223,7 @@ Resources:
       SubnetId: !Ref PublicSubnetAZ1
       Tags:
         - Key: Name
-          Value: "NAT-Gateway"
+          Value: !Sub "${EnvironmentName}-NAT-Gateway"
 
   PrivateRouteTable:
       Type: "AWS::EC2::RouteTable"
@@ -185,7 +231,7 @@ Resources:
         VpcId: !Ref VPC
         Tags:
           - Key: Name
-            Value: "Private-Route-Table"
+            Value: !Sub "${EnvironmentName}-Private-Route-Table"
 
   PrivateSubnetAZ1RouteTableAssociation:
       Type: "AWS::EC2::SubnetRouteTableAssociation"
@@ -225,10 +271,10 @@ Resources:
           - IpProtocol: tcp
             FromPort: 8080
             ToPort: 8080
-            CidrIp: 0.0.0.0/0  # Traefik Dashboard - Consider restricting this
+            CidrIp: !Ref TraefikDashboardAccess
         Tags:
           - Key: Name
-            Value: "Traefik-SG"
+            Value: !Sub "${EnvironmentName}-Traefik-SG"
 
   WebServerSecurityGroup:
       Type: "AWS::EC2::SecurityGroup"
@@ -242,7 +288,7 @@ Resources:
             SourceSecurityGroupId: !Ref TraefikSecurityGroup
         Tags:
           - Key: Name
-            Value: "WebServer-SG"
+            Value: !Sub "${EnvironmentName}-WebServer-SG"
 
   # EFS Security Group
   EFSSecurityGroup:
@@ -257,14 +303,14 @@ Resources:
             SourceSecurityGroupId: !Ref WebServerSecurityGroup
         Tags:
           - Key: Name
-            Value: "EFS-SG"
+            Value: !Sub "${EnvironmentName}-EFS-SG"
 
   # Traefik Load Balancer Instance
   TraefikInstance:
     Type: 'AWS::EC2::Instance'
     Properties:
-      InstanceType: 't2.micro'
-      ImageId: 'ami-0150ccaf51ab55a51'  # Amazon Linux 2
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref AmiId
       SubnetId: !Ref PublicSubnetAZ1
       SecurityGroupIds:
         - !Ref TraefikSecurityGroup
@@ -291,14 +337,14 @@ Resources:
           docker-compose --version
       Tags:
         - Key: Name
-          Value: "Traefik-LoadBalancer"
+          Value: !Sub "${EnvironmentName}-Traefik-LoadBalancer"
 
   # Web Server Instances
   WebServerAZ1:
     Type: 'AWS::EC2::Instance'
     Properties:
-      InstanceType: 't2.micro'
-      ImageId: 'ami-0150ccaf51ab55a51'  # Amazon Linux 2
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref AmiId
       SubnetId: !Ref PrivateSubnetAZ1
       SecurityGroupIds:
         - !Ref WebServerSecurityGroup
@@ -342,13 +388,13 @@ Resources:
           docker-compose --version
       Tags:
         - Key: Name
-          Value: "WebServer-AZ1"
+          Value: !Sub "${EnvironmentName}-WebServer-AZ1"
 
   WebServerAZ2:
     Type: 'AWS::EC2::Instance'
     Properties:
-      InstanceType: 't2.micro'
-      ImageId: 'ami-0150ccaf51ab55a51'  # Amazon Linux 2
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref AmiId
       SubnetId: !Ref PrivateSubnetAZ2
       SecurityGroupIds:
         - !Ref WebServerSecurityGroup
@@ -392,26 +438,26 @@ Resources:
           docker-compose --version
       Tags:
         - Key: Name
-          Value: "WebServer-AZ2"
+          Value: !Sub "${EnvironmentName}-WebServer-AZ2"
 
   # EBS Volumes for Web Servers
   WebServerAZ1Volume:
     Type: 'AWS::EC2::Volume'
     Properties:
-      Size: 50
+      Size: !Ref EBSVolumeSize
       AvailabilityZone: !GetAtt WebServerAZ1.AvailabilityZone
       Tags:
         - Key: Name
-          Value: "WebServer-AZ1-Volume"
+          Value: !Sub "${EnvironmentName}-WebServer-AZ1-Volume"
 
   WebServerAZ2Volume:
     Type: 'AWS::EC2::Volume'
     Properties:
-      Size: 50
+      Size: !Ref EBSVolumeSize
       AvailabilityZone: !GetAtt WebServerAZ2.AvailabilityZone
       Tags:
         - Key: Name
-          Value: "WebServer-AZ2-Volume"
+          Value: !Sub "${EnvironmentName}-WebServer-AZ2-Volume"
 
   WebServerAZ1VolumeAttachment:
     Type: 'AWS::EC2::VolumeAttachment'
@@ -433,10 +479,10 @@ Resources:
     Properties:
       PerformanceMode: generalPurpose
       ThroughputMode: bursting
-      Encrypted: true
+      Encrypted: !Ref EnableEFSEncryption
       FileSystemTags:
         - Key: Name
-          Value: "API-SharedStorage"
+          Value: !Sub "${EnvironmentName}-API-SharedStorage"
 
   # EFS Mount Targets
   EFSMountTargetAZ1:
@@ -475,7 +521,7 @@ Resources:
                 "selection": {
                   "tagStatus": "any",
                   "countType": "imageCountMoreThan",
-                  "countNumber": 10
+                  "countNumber": ${ECRImageRetentionCount}
                 },
                 "action": {
                   "type": "expire"
