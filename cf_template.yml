@@ -512,12 +512,12 @@ Resources:
         EncryptionType: AES256
       ImageTagMutability: MUTABLE
       LifecyclePolicy:
-        LifecyclePolicyText: |
+        LifecyclePolicyText: !Sub |
           {
             "rules": [
               {
                 "rulePriority": 1,
-                "description": "Keep last 10 images",
+                "description": "Keep last ${ECRImageRetentionCount} images",
                 "selection": {
                   "tagStatus": "any",
                   "countType": "imageCountMoreThan",
